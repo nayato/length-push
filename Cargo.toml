@@ -15,8 +15,11 @@ time="*"
 tokio-timer = "*"
 error-chain = "*"
 futures-await = { git = 'https://github.com/alexcrichton/futures-await' }
-uuid = { version = "*", features = ["use_std", "v4"] }
+uuid = { version = "*", features = ["v4"] }
 tokio-tls = { version = "*" }
 
 [profile.release]
 debug = true
+codegen-units = 1
+lto = true
+opt-level = 3
