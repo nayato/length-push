@@ -82,7 +82,7 @@ fn main() {
             thread::Builder::new()
                 .name(format!("worker{}", i))
                 .spawn(move || {
-                    if addr.port() < 10000 {
+                    if addr.port() / 10u16 % 10 == 8u16 { // port is *8?, e.g. 21082
                         push(
                             connections_per_thread as usize,
                             (i * connections_per_thread) as usize,
