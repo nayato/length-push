@@ -14,7 +14,7 @@ bytes="*"
 time="*"
 tokio-timer = "*"
 error-chain = "*"
-futures-await = { git = 'https://github.com/alexcrichton/futures-await' }
+futures-await = "0.1"
 uuid = { version = "*", features = ["v4"] }
 tokio-tls = { version = "*" }
 

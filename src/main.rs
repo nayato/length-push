@@ -150,8 +150,8 @@ fn parse_u64_default(input: Option<&str>, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-fn push<Io, F>(connections: usize, offset: usize, rate: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>, new_transport: Rc<F>)
-    where Io: AsyncRead + AsyncWrite + 'static, F: Fn(Handle) -> Box<Future<Item=Io, Error=Error>> + 'static
+fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>, new_transport: Rc<F>)
+    where Io: AsyncRead + AsyncWrite + 'static, F: 'static + Fn(Handle) -> Ft, Ft: Future<Item=Io, Error=Error>
 {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
@@ -182,8 +182,8 @@ fn push<Io, F>(connections: usize, offset: usize, rate: usize, payload_size: usi
 }
 
 #[async]
-fn connect_with_retry<Io, F>(handle: Handle, new_transport: Rc<F>) -> Result<Io>
-    where Io: AsyncRead + AsyncWrite + 'static, F: Fn(Handle) -> Box<Future<Item=Io, Error=Error>> + 'static
+fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> Result<Io>
+    where Io: AsyncRead + AsyncWrite + 'static, F: 'static + Fn(Handle) -> Ft, Ft: Future<Item=Io, Error=Error>
 {
     #[async]
     for _ in futures::stream::repeat::<_, io::Error>(0) {
@@ -192,8 +192,8 @@ fn connect_with_retry<Io, F>(handle: Handle, new_transport: Rc<F>) -> Result<Io>
                 return Ok(c);
             }
             Err(e) => {
-                println!("{:?}", e); // todo: log e?
-                print!("!"); // todo: log e?
+                println!("{:?}", e);
+                // print!("!"); // todo: log e?
                 await!(tokio_delay(Duration::from_secs(20), handle.clone()))?;
             }
         }
@@ -201,14 +201,14 @@ fn connect_with_retry<Io, F>(handle: Handle, new_transport: Rc<F>) -> Result<Io>
     Err(io::Error::from(io::ErrorKind::NotConnected).into())
 }
 
-#[async(boxed)]
+#[async]
 fn connect_tcp(addr: SocketAddr, handle: Handle) -> Result<TcpStream> {
     let socket = await!(TcpStream::connect(&addr, &handle))?;
     socket.set_nodelay(true).unwrap();
     Ok(socket)
 }
 
-#[async(boxed)]
+#[async]
 fn connect_tls(addr: SocketAddr, handle: Handle) -> Result<TlsStream<TcpStream>> {
     let socket = await!(connect_tcp(addr, handle))?;
     let tls_context = TlsConnector::builder()
