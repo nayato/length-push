@@ -1,8 +1,8 @@
-#![feature(proc_macro, conservative_impl_trait, generators, vec_resize_default)]
+// #![feature(vec_resize_default)]
 
 extern crate bytes;
 extern crate clap;
-extern crate futures_await as futures;
+extern crate futures;
 extern crate num_cpus;
 extern crate time;
 extern crate tokio_core;
@@ -35,10 +35,10 @@ use codec::LengthCodec;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
-#[async]
-fn tokio_delay(val: Duration, loop_handle: Handle) -> Result<()> {
-    await!(tokio_core::reactor::Timeout::new(val, &loop_handle)?)?;
-    Ok(())
+fn tokio_delay(val: Duration, loop_handle: &Handle) -> impl Future<Item = (), Error = io::Error> {
+    future::result(tokio_core::reactor::Timeout::new(val, loop_handle))
+        .map(|_| ())
+        .from_err()
 }
 
 fn main() {
@@ -181,75 +181,74 @@ fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size:
     core.run(conn_stream).unwrap();
 }
 
-#[async]
-fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> Result<Io>
+fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> impl Future <Item = Io, Error = Error>
     where Io: AsyncRead + AsyncWrite + 'static, F: 'static + Fn(Handle) -> Ft, Ft: Future<Item=Io, Error=Error>
 {
-    #[async]
-    for _ in futures::stream::repeat::<_, io::Error>(0) {
-        match await!(new_transport(handle.clone())) {
-            Ok(c) => {
-                return Ok(c);
-            }
-            Err(e) => {
-                println!("{:?}", e);
-                // print!("!"); // todo: log e?
-                await!(tokio_delay(Duration::from_secs(20), handle.clone()))?;
-            }
-        }
-    }
-    Err(io::Error::from(io::ErrorKind::NotConnected).into())
+    Box::new(new_transport.clone()(handle.clone())
+        .or_else(move |_e| {
+            print!("!"); // todo: log e?
+            tokio_delay(Duration::from_secs(20), &handle)
+                .from_err()
+                .and_then(move |_| connect_with_retry(handle, new_transport))
+        })
+    )
 }
 
-#[async]
-fn connect_tcp(addr: SocketAddr, handle: Handle) -> Result<TcpStream> {
-    let socket = await!(TcpStream::connect(&addr, &handle))?;
-    socket.set_nodelay(true).unwrap();
-    Ok(socket)
+fn connect_tcp(addr: SocketAddr, handle: Handle) -> impl Future<Item = TcpStream, Error = Error> {
+    TcpStream::connect(&addr, &handle)
+        .from_err()
+        .map(|socket| {
+            socket.set_nodelay(true).unwrap();
+            socket
+        })
 }
 
-#[async]
-fn connect_tls(addr: SocketAddr, handle: Handle) -> Result<TlsStream<TcpStream>> {
-    let socket = await!(connect_tcp(addr, handle))?;
-    let tls_context = TlsConnector::builder()
-        .unwrap()
-        .build()
-        .unwrap();
-    Ok(await!(tls_context.connect_async("gateway.tests.com", socket).map_err(|e| {
-        Error::with_chain(e, ErrorKind::Msg("TLS handshake failed".into()))
-    }))?)
+fn connect_tls(addr: SocketAddr, handle: Handle) -> impl Future<Item = TlsStream<TcpStream>, Error = Error> {
+    connect_tcp(addr, handle)
+        .from_err()
+        .and_then(|socket| {
+            let tls_context = TlsConnector::builder()
+                .unwrap()
+                .build()
+                .unwrap();
+            tls_context.connect_async("gateway.tests.com", socket).map_err(|e| {
+                Error::with_chain(e, ErrorKind::Msg("TLS handshake failed".into()))
+            })
+        })
 }
 
-#[async]
-pub fn run_connection<Io: AsyncRead + AsyncWrite + 'static>(io: Io, handle: Handle, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>) -> Result<()> {
+pub fn run_connection<Io: AsyncRead + AsyncWrite + 'static>(io: Io, handle: Handle, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>
+) -> impl Future<Item = (), Error = Error> {
     let perf_counters = perf_counters.clone();
     //let mut connection = io.framed(LengthCodec::new());
     let len = payload.len();
     let mut req = BytesMut::with_capacity(len + 4);
-    req.put_u32::<bytes::BigEndian>(len as u32);
-
+    req.put_u32_be(len as u32);
     req.put_slice(payload.as_ref());
-    let mut req = req.freeze();
-    let mut io = io;
-    let mut resp = vec![0; len + 4];
-    for _ in std::iter::repeat(0) {
-        if delay > Duration::default() {
-            await!(tokio_delay(delay, handle.clone()))?;
-        }
-        let timestamp = time::precise_time_ns();
-        let (io1, req1) = await!(tokio_io::io::write_all(io, req))?; // sending payload
-        req = req1;
-        let (io2, resp1) = await!(tokio_io::io::read_exact(io1, resp))?;
-        io = io2;
-        resp = resp1;
-        //resp.clear();
-        //connection = await!(connection.send(payload.clone()))?; // sending payload
-        // let (_, conn1) = await!(connection.into_future()).map_err(|e| e.0)?; // waiting for echo response
-        // connection = conn1;
-        perf_counters.register_request();
-        perf_counters.register_latency(time::precise_time_ns() - timestamp);
-    }
-    Ok(())
+    let req = req.freeze();
+    let resp = vec![0; len + 4];
+    futures::future::loop_fn(
+        (io, req, resp, perf_counters, handle),
+        move |(io, req, resp, perf_counters, handle)| {
+            let timestamp = time::precise_time_ns();
+            tokio_io::io::write_all(io, req) // sending payload
+                .from_err()
+                .and_then(move |(io, req)| {
+                    tokio_io::io::read_exact(io, resp)
+                        .from_err()
+                        .and_then(move |(io, resp)| {
+                            perf_counters.register_request();
+                            perf_counters.register_latency(time::precise_time_ns() - timestamp);
+                            let fut = if delay > Duration::default() {
+                                future::Either::A(tokio_delay(delay, &handle).from_err())
+                            }
+                            else {
+                                future::Either::B(future::ok(()))
+                            };
+                            fut.map(move |_| future::Loop::Continue((io, req, resp, perf_counters, handle)))
+                        })
+                })
+        })
 }
 
 pub struct PerfCounters {

@@ -8,15 +8,15 @@ tokio-io = "0.1"
 tokio-core = "0.1"
 net2 = "*"
 num_cpus = "1"
-native-tls = "*"
+native-tls = "0.1"
 clap = "2"
 bytes="*"
 time="*"
 tokio-timer = "*"
 error-chain = "*"
-futures-await = "0.1"
+futures = "0.1"
 uuid = { version = "*", features = ["v4"] }
-tokio-tls = { version = "*" }
+tokio-tls = "0.1"
 
 [profile.release]
 debug = true
