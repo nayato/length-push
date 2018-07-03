@@ -1,5 +1,3 @@
-// #![feature(vec_resize_default)]
-
 extern crate bytes;
 extern crate clap;
 extern crate futures;
@@ -13,13 +11,12 @@ extern crate native_tls;
 #[macro_use]
 extern crate error_chain;
 
-use futures::prelude::*;
 use std::net::SocketAddr;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::{Core, Handle};
 use std::{cmp, io, thread};
-use futures::{future, Future, Sink, Stream};
-use bytes::{Bytes, BytesMut, BufMut, BigEndian, ByteOrder};
+use futures::{future, Future, Stream};
+use bytes::{Bytes, BytesMut, BufMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
