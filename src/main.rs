@@ -148,7 +148,7 @@ fn parse_u64_default(input: Option<&str>, default: u64) -> u64 {
 }
 
 fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>, new_transport: Rc<F>)
-    where Io: AsyncRead + AsyncWrite + 'static, F: 'static + Fn(Handle) -> Ft, Ft: Future<Item=Io, Error=Error>
+    where Io: AsyncRead + AsyncWrite + 'static, F: 'static + Fn(Handle) -> Ft, Ft: Future<Item=Io, Error=Error> + 'static
 {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
@@ -178,8 +178,8 @@ fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size:
     core.run(conn_stream).unwrap();
 }
 
-fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> impl Future <Item = Io, Error = Error>
-    where Io: AsyncRead + AsyncWrite + 'static, F: 'static + Fn(Handle) -> Ft, Ft: Future<Item=Io, Error=Error>
+fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> Box<Future<Item = Io, Error = Error>>
+    where Io: AsyncRead + AsyncWrite + 'static, F: 'static + Fn(Handle) -> Ft, Ft: Future<Item=Io, Error=Error> + 'static
 {
     Box::new(new_transport.clone()(handle.clone())
         .or_else(move |_e| {
