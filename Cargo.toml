@@ -12,7 +12,7 @@ native-tls = "0.1"
 clap = "2"
 bytes="*"
 time="*"
-tokio-timer = "*"
+tokio-timer = "0.2"
 error-chain = "*"
 futures = "0.1"
 uuid = { version = "*", features = ["v4"] }

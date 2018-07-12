@@ -32,10 +32,8 @@ use codec::LengthCodec;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
-fn tokio_delay(val: Duration, loop_handle: &Handle) -> impl Future<Item = (), Error = io::Error> {
-    future::result(tokio_core::reactor::Timeout::new(val, loop_handle))
-        .map(|_| ())
-        .from_err()
+fn tokio_delay(val: Duration) -> impl Future<Item = (), Error = io::Error> {
+    tokio_timer::sleep(val).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
 }
 
 fn main() {
@@ -50,7 +48,7 @@ fn main() {
                 -w, --warm-up=[SECONDS] 'seconds before counter values are considered for reporting'
                 -r, --sample-rate=[SECONDS] 'seconds between average reports'
                 -d, --delay=[MILLISECONDS] 'delay in milliseconds between two calls made for the same connection'
-                --connection-rate=[COUNT] 'number of connections allowed to open concurrently (per thread)'
+                -q, --connection-rate=[COUNT] 'number of connections allowed to open concurrently (per thread)'
                 -t, --threads=[NUMBER] 'number of threads to use'",
         )
         .get_matches();
@@ -157,7 +155,7 @@ fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size:
     let timestamp = time::precise_time_ns();
     println!("now connecting at rate {}", rate);
     let conn_stream = futures::stream::iter_ok(0..connections)
-        .map(|i| connect_with_retry(handle.clone(), new_transport.clone()))
+        .map(|_| connect_with_retry(handle.clone(), new_transport.clone()))
         .buffered(rate)
         .collect()
         .and_then(|connections| {
@@ -166,16 +164,21 @@ fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size:
                 connections.len(),
                 time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64)
             );
-            future::join_all(connections.into_iter().map(|conn| {
-                run_connection(conn, handle.clone(), Bytes::from(payload.as_ref()), delay, perf_counters.clone())
-            }))
-        })
-        .map_err(|e| {
-            println!("error: {:?}", e);
-            e
-        })
-        .and_then(|_| Ok(()));
-    core.run(conn_stream).unwrap();
+            for conn in connections {
+                handle.spawn(run_connection(conn, handle.clone(), Bytes::from(payload.as_ref()), delay, perf_counters.clone())
+                        .map_err(|e| println!("error: {:?}", e)));
+            }
+            future::empty::<(), _>()
+            // future::join_all(connections.into_iter().map(|conn| {
+            //     run_connection(conn, handle.clone(), Bytes::from(payload.as_ref()), delay, perf_counters.clone())
+            // }))
+        });
+        // .map_err(|e| {
+        //     println!("error: {:?}", e);
+        //     e
+        // })
+        // .and_then(|_| Ok(()));
+    core.run(conn_stream).expect("Worker failed");
 }
 
 fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> Box<Future<Item = Io, Error = Error>>
@@ -183,8 +186,9 @@ fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> Box<Fu
 {
     Box::new(new_transport.clone()(handle.clone())
         .or_else(move |_e| {
-            print!("!"); // todo: log e?
-            tokio_delay(Duration::from_secs(20), &handle)
+            println!("{:?}", _e);
+            // print!("!");
+            tokio_delay(Duration::from_secs(20))
                 .from_err()
                 .and_then(move |_| connect_with_retry(handle, new_transport))
         })
@@ -194,9 +198,9 @@ fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> Box<Fu
 fn connect_tcp(addr: SocketAddr, handle: Handle) -> impl Future<Item = TcpStream, Error = Error> {
     TcpStream::connect(&addr, &handle)
         .from_err()
-        .map(|socket| {
-            socket.set_nodelay(true).unwrap();
-            socket
+        .and_then(|socket| {
+            socket.set_nodelay(true)?;
+            Ok(socket)
         })
 }
 
@@ -237,7 +241,7 @@ pub fn run_connection<Io: AsyncRead + AsyncWrite + 'static>(io: Io, handle: Hand
                             perf_counters.register_request();
                             perf_counters.register_latency(time::precise_time_ns() - timestamp);
                             let fut = if delay > Duration::default() {
-                                future::Either::A(tokio_delay(delay, &handle).from_err())
+                                future::Either::A(tokio_delay(delay).from_err())
                             }
                             else {
                                 future::Either::B(future::ok(()))
