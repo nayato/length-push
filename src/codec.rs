@@ -62,7 +62,7 @@ impl Encoder for LengthCodec {
     fn encode(&mut self, msg: Self::Item, dst: &mut BytesMut) -> Result<()> {
         let len = msg.len();
         dst.reserve(4 + len);
-        dst.put_u32::<BigEndian>(len as u32);
+        dst.put_u32_be(len as u32);
         if len > 0 {
             dst.put_slice(msg.as_ref());
         }

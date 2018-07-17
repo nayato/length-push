@@ -1,8 +1,9 @@
 extern crate bytes;
-extern crate clap;
+#[macro_use]
+extern crate structopt;
 extern crate futures;
 extern crate num_cpus;
-extern crate time;
+extern crate chrono;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_timer;
@@ -14,21 +15,25 @@ extern crate error_chain;
 use std::net::SocketAddr;
 use tokio_core::net::TcpStream;
 use tokio_core::reactor::{Core, Handle};
-use std::{cmp, io, thread};
+use std::{io, thread};
 use futures::{future, Future, Stream};
 use bytes::{Bytes, BytesMut, BufMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use native_tls::TlsConnector;
 use tokio_tls::{TlsConnectorExt, TlsStream};
 use tokio_io::{AsyncRead, AsyncWrite};
 use std::rc::Rc;
+use structopt::StructOpt;
 
 mod error;
 mod codec;
+mod counters;
+mod options;
 use error::*;
 use codec::LengthCodec;
+use counters::PerfCounters;
+use options::Opt;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
@@ -37,66 +42,36 @@ fn tokio_delay(val: Duration) -> impl Future<Item = (), Error = io::Error> {
 }
 
 fn main() {
-    let matches = clap::App::new("Length Push")
-        .version("0.1")
-        .about("Applies load to Length-prefixed echo server")
-        .args_from_usage(
-            "<address> 'IP address and port to push'
-                -s, --size=[NUMBER] 'size of PUBLISH packet payload to send in KB'
-                -p, --precise-size=[NUMBER] 'size of PUBLISH packet payload to send in bytes'
-                -c, --concurrency=[NUMBER] 'number of MQTT connections to open and use concurrently for sending'
-                -w, --warm-up=[SECONDS] 'seconds before counter values are considered for reporting'
-                -r, --sample-rate=[SECONDS] 'seconds between average reports'
-                -d, --delay=[MILLISECONDS] 'delay in milliseconds between two calls made for the same connection'
-                -q, --connection-rate=[COUNT] 'number of connections allowed to open concurrently (per thread)'
-                -t, --threads=[NUMBER] 'number of threads to use'",
-        )
-        .get_matches();
-
-    let addr: SocketAddr = matches.value_of("address").unwrap().parse().unwrap();
-    let payload_size: usize = match (matches.value_of("size"), matches.value_of("precise-size")) {
-        (Some(s), _) => parse_u64_default(Some(s), 0) as usize * 1024, // -s takes precedence
-        (None, Some(p)) => parse_u64_default(Some(p), 0) as usize,
-        (None, None) => 0
-    };
-    let concurrency = parse_u64_default(matches.value_of("concurrency"), 1);
-    let threads = cmp::min(
-        concurrency,
-        parse_u64_default(matches.value_of("threads"), num_cpus::get() as u64),
-    );
-    let warmup_seconds = parse_u64_default(matches.value_of("warm-up"), 2) as u64;
-    let sample_rate = parse_u64_default(matches.value_of("sample-rate"), 1) as u64;
-    let delay = Duration::from_millis(parse_u64_default(matches.value_of("delay"), 0));
-
-    let connections_per_thread = cmp::max(concurrency / threads, 1);
-    let connection_rate = parse_u64_default(matches.value_of("connection-rate"), connections_per_thread) as usize;
+    let opt = Arc::new(Opt::from_args());
     let perf_counters = Arc::new(PerfCounters::new());
-    let threads = (0..threads)
+
+    let threads = (0..opt.threads())
         .map(|i| {
             let counters = perf_counters.clone();
+            let opt = opt.clone();
             thread::Builder::new()
                 .name(format!("worker{}", i))
                 .spawn(move || {
-                    if addr.port() / 10u16 % 10 == 8u16 { // port is *8?, e.g. 21082
+                    if opt.address.port() / 10u16 % 10 == 8u16 { // port is *8?, e.g. 21082
                         push(
-                            connections_per_thread as usize,
-                            (i * connections_per_thread) as usize,
-                            connection_rate,
-                            payload_size,
-                            delay,
+                            opt.connections_per_thread() as usize,
+                            (i * opt.connections_per_thread()) as usize,
+                            opt.connection_rate(),
+                            opt.payload_size(),
+                            opt.delay(),
                             &counters,
-                            Rc::new(move |h| connect_tcp(addr, h))
+                            Rc::new(move |h| connect_tcp(opt.address, h))
                         )
                     }
                     else {
                         push(
-                            connections_per_thread as usize,
-                            (i * connections_per_thread) as usize,
-                            connection_rate,
-                            payload_size,
-                            delay,
+                            opt.connections_per_thread() as usize,
+                            (i * opt.connections_per_thread()) as usize,
+                            opt.connection_rate(),
+                            opt.payload_size(),
+                            opt.delay(),
                             &counters,
-                            Rc::new(move |h| connect_tls(addr, h))
+                            Rc::new(move |h| connect_tls(opt.address, h))
                         )
                     }
                 })
@@ -104,45 +79,12 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    let counters = perf_counters.clone();
-    let monitor_thread = thread::Builder::new()
-        .name("monitor".to_string())
-        .spawn(move || {
-            thread::sleep(Duration::from_secs(warmup_seconds));
-            println!("warm up past");
-            let mut prev_reqs = 0;
-            let mut prev_lat = 0;
-            loop {
-                let reqs = counters.request_count();
-                if reqs > prev_reqs {
-                    let latency = counters.latency_ns();
-                    let latency_max = counters.pull_latency_max_ns();
-                    let req_count = (reqs - prev_reqs) as u64;
-                    let latency_diff = latency - prev_lat;
-                    println!(
-                        "rate: {}, latency: {}, latency max: {}",
-                        req_count / sample_rate,
-                        time::Duration::nanoseconds((latency_diff / req_count) as i64),
-                        time::Duration::nanoseconds(latency_max as i64)
-                    );
-                    prev_reqs = reqs;
-                    prev_lat = latency;
-                }
-                thread::sleep(Duration::from_secs(sample_rate));
-            }
-        })
-        .unwrap();
+    let monitor_thread = counters::setup_monitor(perf_counters, opt.warm_up_seconds, opt.sample_rate_seconds);
 
     for thread in threads {
         thread.join().unwrap();
     }
     monitor_thread.join().unwrap();
-}
-
-fn parse_u64_default(input: Option<&str>, default: u64) -> u64 {
-    input
-        .map(|v| v.parse().expect(&format!("not a valid number: {}", v)))
-        .unwrap_or(default)
 }
 
 fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>, new_transport: Rc<F>)
@@ -152,7 +94,7 @@ fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size:
     let handle = core.handle();
     let payload = Bytes::from_static(&PAYLOAD_SOURCE[..payload_size]);
 
-    let timestamp = time::precise_time_ns();
+    let timestamp = ::std::time::Instant::now();
     println!("now connecting at rate {}", rate);
     let conn_stream = futures::stream::iter_ok(0..connections)
         .map(|_| connect_with_retry(handle.clone(), new_transport.clone()))
@@ -162,22 +104,14 @@ fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size:
             println!(
                 "done connecting {} in {}",
                 connections.len(),
-                time::Duration::nanoseconds((time::precise_time_ns() - timestamp) as i64)
+                chrono::Duration::from_std(timestamp.elapsed()).unwrap()
             );
             for conn in connections {
                 handle.spawn(run_connection(conn, handle.clone(), Bytes::from(payload.as_ref()), delay, perf_counters.clone())
                         .map_err(|e| println!("error: {:?}", e)));
             }
             future::empty::<(), _>()
-            // future::join_all(connections.into_iter().map(|conn| {
-            //     run_connection(conn, handle.clone(), Bytes::from(payload.as_ref()), delay, perf_counters.clone())
-            // }))
         });
-        // .map_err(|e| {
-        //     println!("error: {:?}", e);
-        //     e
-        // })
-        // .and_then(|_| Ok(()));
     core.run(conn_stream).expect("Worker failed");
 }
 
@@ -186,8 +120,8 @@ fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> Box<Fu
 {
     Box::new(new_transport.clone()(handle.clone())
         .or_else(move |_e| {
-            println!("{:?}", _e);
-            // print!("!");
+            // println!("{:?}", _e);
+            print!("!");
             tokio_delay(Duration::from_secs(20))
                 .from_err()
                 .and_then(move |_| connect_with_retry(handle, new_transport))
@@ -231,15 +165,14 @@ pub fn run_connection<Io: AsyncRead + AsyncWrite + 'static>(io: Io, handle: Hand
     futures::future::loop_fn(
         (io, req, resp, perf_counters, handle),
         move |(io, req, resp, perf_counters, handle)| {
-            let timestamp = time::precise_time_ns();
+            let rec = perf_counters.start_request();
             tokio_io::io::write_all(io, req) // sending payload
                 .from_err()
                 .and_then(move |(io, req)| {
                     tokio_io::io::read_exact(io, resp)
                         .from_err()
                         .and_then(move |(io, resp)| {
-                            perf_counters.register_request();
-                            perf_counters.register_latency(time::precise_time_ns() - timestamp);
+                            perf_counters.stop_request(rec);
                             let fut = if delay > Duration::default() {
                                 future::Either::A(tokio_delay(delay).from_err())
                             }
@@ -252,45 +185,45 @@ pub fn run_connection<Io: AsyncRead + AsyncWrite + 'static>(io: Io, handle: Hand
         })
 }
 
-pub struct PerfCounters {
-    req: AtomicUsize,
-    lat: AtomicUsize,
-    lat_max: AtomicUsize
-}
+// pub struct PerfCounters {
+//     req: AtomicUsize,
+//     lat: AtomicUsize,
+//     lat_max: AtomicUsize
+// }
 
-impl PerfCounters {
-    pub fn new() -> PerfCounters {
-        PerfCounters {
-            req: AtomicUsize::new(0),
-            lat: AtomicUsize::new(0),
-            lat_max: AtomicUsize::new(0),
-        }
-    }
+// impl PerfCounters {
+//     pub fn new() -> PerfCounters {
+//         PerfCounters {
+//             req: AtomicUsize::new(0),
+//             lat: AtomicUsize::new(0),
+//             lat_max: AtomicUsize::new(0),
+//         }
+//     }
 
-    pub fn request_count(&self) -> usize {
-        self.req.load(Ordering::SeqCst)
-    }
+//     pub fn request_count(&self) -> usize {
+//         self.req.load(Ordering::SeqCst)
+//     }
 
-    pub fn latency_ns(&self) -> u64 {
-        self.lat.load(Ordering::SeqCst) as u64
-    }
+//     pub fn latency_ns(&self) -> u64 {
+//         self.lat.load(Ordering::SeqCst) as u64
+//     }
 
-    pub fn pull_latency_max_ns(&self) -> u64 {
-        self.lat_max.swap(0, Ordering::SeqCst) as u64
-    }
+//     pub fn pull_latency_max_ns(&self) -> u64 {
+//         self.lat_max.swap(0, Ordering::SeqCst) as u64
+//     }
 
-    pub fn register_request(&self) {
-        self.req.fetch_add(1, Ordering::SeqCst);
-    }
+//     pub fn register_request(&self) {
+//         self.req.fetch_add(1, Ordering::SeqCst);
+//     }
 
-    pub fn register_latency(&self, nanos: u64) {
-        let nanos = nanos as usize;
-        self.lat.fetch_add(nanos, Ordering::SeqCst);
-        loop {
-            let current = self.lat_max.load(Ordering::SeqCst);
-            if current >= nanos || self.lat_max.compare_and_swap(current, nanos, Ordering::SeqCst) == current {
-                break;
-            }
-        }
-    }
-}
+//     pub fn register_latency(&self, duration: Duration) {
+//         let nanos = duration.as_secs() as usize * 1_000_000_000 + duration.subsec_nanos() as usize;
+//         self.lat.fetch_add(nanos as usize, Ordering::SeqCst);
+//         loop {
+//             let current = self.lat_max.load(Ordering::SeqCst);
+//             if current >= nanos || self.lat_max.compare_and_swap(current, nanos, Ordering::SeqCst) == current {
+//                 break;
+//             }
+//         }
+//     }
+// }
