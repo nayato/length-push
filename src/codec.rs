@@ -1,6 +1,6 @@
-use tokio_io::codec::{Decoder, Encoder};
-use bytes::{BytesMut, BufMut, BigEndian, ByteOrder};
 use super::error::*;
+use bytes::{BigEndian, BufMut, ByteOrder, BytesMut};
+use tokio_io::codec::{Decoder, Encoder};
 
 pub struct LengthCodec {
     state: DecodeState,
@@ -18,7 +18,7 @@ impl LengthCodec {
     }
 }
 
-const HEAD_LEN: usize = 4; 
+const HEAD_LEN: usize = 4;
 impl Decoder for LengthCodec {
     type Item = BytesMut;
     type Error = Error;

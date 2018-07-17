@@ -1,9 +1,7 @@
 use chrono;
 use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicUsize, Ordering},
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -47,9 +45,7 @@ impl PerfCounters {
 
     pub fn start_request(&self) -> RequestStat {
         self.req_current.fetch_add(1, Ordering::SeqCst);
-        RequestStat {
-            timestamp: Instant::now(),
-        }
+        RequestStat { timestamp: Instant::now() }
     }
 
     pub fn stop_request(&self, req: RequestStat) {
@@ -60,23 +56,14 @@ impl PerfCounters {
         self.lat.fetch_add(nanos as usize, Ordering::SeqCst);
         loop {
             let current = self.lat_max.load(Ordering::SeqCst);
-            if current >= nanos
-                || self
-                    .lat_max
-                    .compare_and_swap(current, nanos, Ordering::SeqCst)
-                    == current
-            {
+            if current >= nanos || self.lat_max.compare_and_swap(current, nanos, Ordering::SeqCst) == current {
                 break;
             }
         }
     }
 }
 
-pub fn setup_monitor(
-    counters: Arc<PerfCounters>,
-    warmup_seconds: u64,
-    sample_rate: u64,
-) -> thread::JoinHandle<()> {
+pub fn setup_monitor(counters: Arc<PerfCounters>, warmup_seconds: u64, sample_rate: u64) -> thread::JoinHandle<()> {
     let monitor_thread = thread::Builder::new()
         .name("monitor".to_string())
         .spawn(move || {
@@ -96,13 +83,7 @@ pub fn setup_monitor(
                     println!(
                         "rate: {}, latency: {}, latency max: {}, in-flight: {}",
                         req_count / sample_rate,
-                        chrono::Duration::nanoseconds(
-                            (if req_count > 0 {
-                                latency_diff / req_count
-                            } else {
-                                0
-                            }) as i64
-                        ),
+                        chrono::Duration::nanoseconds((if req_count > 0 { latency_diff / req_count } else { 0 }) as i64),
                         chrono::Duration::nanoseconds(latency_max as i64),
                         reqs_current
                     );

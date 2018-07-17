@@ -1,38 +1,36 @@
 extern crate bytes;
 #[macro_use]
 extern crate structopt;
-extern crate futures;
-extern crate num_cpus;
 extern crate chrono;
+extern crate futures;
+extern crate native_tls;
+extern crate num_cpus;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_timer;
 extern crate tokio_tls;
-extern crate native_tls;
 #[macro_use]
 extern crate error_chain;
 
-use std::net::SocketAddr;
-use tokio_core::net::TcpStream;
-use tokio_core::reactor::{Core, Handle};
-use std::{io, thread};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::{future, Future, Stream};
-use bytes::{Bytes, BytesMut, BufMut};
-use std::sync::Arc;
-use std::time::Duration;
 use native_tls::TlsConnector;
-use tokio_tls::{TlsConnectorExt, TlsStream};
-use tokio_io::{AsyncRead, AsyncWrite};
-use std::rc::Rc;
+use std::{io, net::SocketAddr, rc::Rc, sync::Arc, thread, time::Duration};
 use structopt::StructOpt;
+use tokio_core::{
+    net::TcpStream,
+    reactor::{Core, Handle},
+};
+use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_tls::{TlsConnectorExt, TlsStream};
 
-mod error;
 mod codec;
 mod counters;
+mod error;
 mod options;
-use error::*;
 use codec::LengthCodec;
 use counters::PerfCounters;
+use error::*;
 use options::Opt;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
@@ -52,7 +50,8 @@ fn main() {
             thread::Builder::new()
                 .name(format!("worker{}", i))
                 .spawn(move || {
-                    if opt.address.port() / 10u16 % 10 == 8u16 { // port is *8?, e.g. 21082
+                    if opt.address.port() / 10u16 % 10 == 8u16 {
+                        // port is *8?, e.g. 21082
                         push(
                             opt.connections_per_thread() as usize,
                             (i * opt.connections_per_thread()) as usize,
@@ -60,10 +59,9 @@ fn main() {
                             opt.payload_size(),
                             opt.delay(),
                             &counters,
-                            Rc::new(move |h| connect_tcp(opt.address, h))
+                            Rc::new(move |h| connect_tcp(opt.address, h)),
                         )
-                    }
-                    else {
+                    } else {
                         push(
                             opt.connections_per_thread() as usize,
                             (i * opt.connections_per_thread()) as usize,
@@ -71,7 +69,7 @@ fn main() {
                             opt.payload_size(),
                             opt.delay(),
                             &counters,
-                            Rc::new(move |h| connect_tls(opt.address, h))
+                            Rc::new(move |h| connect_tls(opt.address, h)),
                         )
                     }
                 })
@@ -87,8 +85,18 @@ fn main() {
     monitor_thread.join().unwrap();
 }
 
-fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size: usize, delay: Duration, perf_counters: &Arc<PerfCounters>, new_transport: Rc<F>)
-    where Io: AsyncRead + AsyncWrite + 'static, F: 'static + Fn(Handle) -> Ft, Ft: Future<Item=Io, Error=Error> + 'static
+fn push<Io, F, Ft>(
+    connections: usize,
+    offset: usize,
+    rate: usize,
+    payload_size: usize,
+    delay: Duration,
+    perf_counters: &Arc<PerfCounters>,
+    new_transport: Rc<F>,
+) where
+    Io: AsyncRead + AsyncWrite + 'static,
+    F: 'static + Fn(Handle) -> Ft,
+    Ft: Future<Item = Io, Error = Error> + 'static,
 {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
@@ -107,8 +115,10 @@ fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size:
                 chrono::Duration::from_std(timestamp.elapsed()).unwrap()
             );
             for conn in connections {
-                handle.spawn(run_connection(conn, handle.clone(), Bytes::from(payload.as_ref()), delay, perf_counters.clone())
-                        .map_err(|e| println!("error: {:?}", e)));
+                handle.spawn(
+                    run_connection(conn, handle.clone(), Bytes::from(payload.as_ref()), delay, perf_counters.clone())
+                        .map_err(|e| println!("error: {:?}", e)),
+                );
             }
             future::empty::<(), _>()
         });
@@ -116,43 +126,42 @@ fn push<Io, F, Ft>(connections: usize, offset: usize, rate: usize, payload_size:
 }
 
 fn connect_with_retry<Io, F, Ft>(handle: Handle, new_transport: Rc<F>) -> Box<Future<Item = Io, Error = Error>>
-    where Io: AsyncRead + AsyncWrite + 'static, F: 'static + Fn(Handle) -> Ft, Ft: Future<Item=Io, Error=Error> + 'static
+where
+    Io: AsyncRead + AsyncWrite + 'static,
+    F: 'static + Fn(Handle) -> Ft,
+    Ft: Future<Item = Io, Error = Error> + 'static,
 {
-    Box::new(new_transport.clone()(handle.clone())
-        .or_else(move |_e| {
-            // println!("{:?}", _e);
-            print!("!");
-            tokio_delay(Duration::from_secs(20))
-                .from_err()
-                .and_then(move |_| connect_with_retry(handle, new_transport))
-        })
-    )
+    Box::new(new_transport.clone()(handle.clone()).or_else(move |_e| {
+        // println!("{:?}", _e);
+        print!("!");
+        tokio_delay(Duration::from_secs(20))
+            .from_err()
+            .and_then(move |_| connect_with_retry(handle, new_transport))
+    }))
 }
 
 fn connect_tcp(addr: SocketAddr, handle: Handle) -> impl Future<Item = TcpStream, Error = Error> {
-    TcpStream::connect(&addr, &handle)
-        .from_err()
-        .and_then(|socket| {
-            socket.set_nodelay(true)?;
-            Ok(socket)
-        })
+    TcpStream::connect(&addr, &handle).from_err().and_then(|socket| {
+        socket.set_nodelay(true)?;
+        Ok(socket)
+    })
 }
 
 fn connect_tls(addr: SocketAddr, handle: Handle) -> impl Future<Item = TlsStream<TcpStream>, Error = Error> {
-    connect_tcp(addr, handle)
-        .from_err()
-        .and_then(|socket| {
-            let tls_context = TlsConnector::builder()
-                .unwrap()
-                .build()
-                .unwrap();
-            tls_context.connect_async("gateway.tests.com", socket).map_err(|e| {
-                Error::with_chain(e, ErrorKind::Msg("TLS handshake failed".into()))
-            })
-        })
+    connect_tcp(addr, handle).from_err().and_then(|socket| {
+        let tls_context = TlsConnector::builder().unwrap().build().unwrap();
+        tls_context
+            .connect_async("gateway.tests.com", socket)
+            .map_err(|e| Error::with_chain(e, ErrorKind::Msg("TLS handshake failed".into())))
+    })
 }
 
-pub fn run_connection<Io: AsyncRead + AsyncWrite + 'static>(io: Io, handle: Handle, payload: Bytes, delay: Duration, perf_counters: Arc<PerfCounters>
+pub fn run_connection<Io: AsyncRead + AsyncWrite + 'static>(
+    io: Io,
+    handle: Handle,
+    payload: Bytes,
+    delay: Duration,
+    perf_counters: Arc<PerfCounters>,
 ) -> impl Future<Item = (), Error = Error> {
     let perf_counters = perf_counters.clone();
     //let mut connection = io.framed(LengthCodec::new());
@@ -182,7 +191,8 @@ pub fn run_connection<Io: AsyncRead + AsyncWrite + 'static>(io: Io, handle: Hand
                             fut.map(move |_| future::Loop::Continue((io, req, resp, perf_counters, handle)))
                         })
                 })
-        })
+        },
+    )
 }
 
 // pub struct PerfCounters {

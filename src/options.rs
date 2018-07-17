@@ -1,7 +1,5 @@
 use num_cpus;
-use std::cmp;
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{cmp, net::SocketAddr, time::Duration};
 
 #[derive(StructOpt, Debug, Clone)]
 #[structopt(name = "length-push", about = "Applies load to Length-prefixed echo server")]
