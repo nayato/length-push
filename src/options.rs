@@ -4,7 +4,7 @@ use std::{cmp, net::SocketAddr, time::Duration};
 #[derive(StructOpt, Debug, Clone)]
 #[structopt(name = "length-push", about = "Applies load to Length-prefixed echo server")]
 pub struct Opt {
-    #[structopt(short = "a", long = "address", parse(try_from_str))]
+    #[structopt(parse(try_from_str))]
     pub address: SocketAddr,
     #[structopt(short = "s", long = "size", help = "size of payload to send in KB")]
     size_kb: Option<usize>,
