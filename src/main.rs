@@ -16,7 +16,6 @@ use bytes::{BufMut, Bytes, BytesMut};
 use futures::{future, Future, Stream};
 use native_tls::TlsConnector;
 use std::{io, net::SocketAddr, rc::Rc, sync::Arc, thread, time::Duration};
-use structopt::StructOpt;
 use tokio_core::{
     net::TcpStream,
     reactor::{Core, Handle},
@@ -31,7 +30,6 @@ mod options;
 use codec::LengthCodec;
 use counters::PerfCounters;
 use error::*;
-use options::Opt;
 
 static PAYLOAD_SOURCE: &[u8] = include_bytes!("lorem.txt");
 
@@ -40,13 +38,13 @@ fn tokio_delay(val: Duration) -> impl Future<Item = (), Error = io::Error> {
 }
 
 fn main() {
-    let opt = Arc::new(Opt::from_args());
+    let options = Arc::new(<options::Opt as structopt::StructOpt>::from_args());
     let perf_counters = Arc::new(PerfCounters::new());
 
-    let threads = (0..opt.threads())
+    let threads = (0..options.threads())
         .map(|i| {
             let counters = perf_counters.clone();
-            let opt = opt.clone();
+            let opt = options.clone();
             thread::Builder::new()
                 .name(format!("worker{}", i))
                 .spawn(move || {
@@ -77,7 +75,7 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
-    let monitor_thread = counters::setup_monitor(perf_counters, opt.warm_up_seconds, opt.sample_rate_seconds);
+    let monitor_thread = counters::setup_monitor(perf_counters, options.warm_up_seconds, options.sample_rate_seconds);
 
     for thread in threads {
         thread.join().unwrap();
@@ -194,46 +192,3 @@ pub fn run_connection<Io: AsyncRead + AsyncWrite + 'static>(
         },
     )
 }
-
-// pub struct PerfCounters {
-//     req: AtomicUsize,
-//     lat: AtomicUsize,
-//     lat_max: AtomicUsize
-// }
-
-// impl PerfCounters {
-//     pub fn new() -> PerfCounters {
-//         PerfCounters {
-//             req: AtomicUsize::new(0),
-//             lat: AtomicUsize::new(0),
-//             lat_max: AtomicUsize::new(0),
-//         }
-//     }
-
-//     pub fn request_count(&self) -> usize {
-//         self.req.load(Ordering::SeqCst)
-//     }
-
-//     pub fn latency_ns(&self) -> u64 {
-//         self.lat.load(Ordering::SeqCst) as u64
-//     }
-
-//     pub fn pull_latency_max_ns(&self) -> u64 {
-//         self.lat_max.swap(0, Ordering::SeqCst) as u64
-//     }
-
-//     pub fn register_request(&self) {
-//         self.req.fetch_add(1, Ordering::SeqCst);
-//     }
-
-//     pub fn register_latency(&self, duration: Duration) {
-//         let nanos = duration.as_secs() as usize * 1_000_000_000 + duration.subsec_nanos() as usize;
-//         self.lat.fetch_add(nanos as usize, Ordering::SeqCst);
-//         loop {
-//             let current = self.lat_max.load(Ordering::SeqCst);
-//             if current >= nanos || self.lat_max.compare_and_swap(current, nanos, Ordering::SeqCst) == current {
-//                 break;
-//             }
-//         }
-//     }
-// }
