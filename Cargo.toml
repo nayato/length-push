@@ -16,7 +16,11 @@ tokio-timer = "0.2"
 error-chain = "0.12"
 futures = "0.1"
 uuid = { version = "0.6", features = ["v4"] }
-tokio-tls = "0.1"
+# tokio-tls = "0.1"
+webpki = "0.18"
+rustls = { version = "0.12", features = ["dangerous_configuration"] }
+tokio-rustls = "0.5"
+lazy_static = "1.0"
 
 [profile.release]
 debug = true

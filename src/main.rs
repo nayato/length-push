@@ -8,20 +8,27 @@ extern crate num_cpus;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_timer;
-extern crate tokio_tls;
+extern crate rustls;
+extern crate tokio_rustls;
+extern crate webpki;
+// extern crate tokio_tls;
 #[macro_use]
 extern crate error_chain;
+#[macro_use]
+extern crate lazy_static;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{future, Future, Stream};
-use native_tls::TlsConnector;
 use std::{io, net::SocketAddr, rc::Rc, sync::Arc, thread, time::Duration};
 use tokio_core::{
     net::TcpStream,
     reactor::{Core, Handle},
 };
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_tls::{TlsConnectorExt, TlsStream};
+// use native_tls::TlsConnector;
+// use tokio_tls::{TlsConnectorExt, TlsStream};
+use rustls::ClientConfig;
+use tokio_rustls::{TlsStream, ClientConfigExt};
 
 mod codec;
 mod counters;
@@ -145,11 +152,34 @@ fn connect_tcp(addr: SocketAddr, handle: Handle) -> impl Future<Item = TcpStream
     })
 }
 
-fn connect_tls(addr: SocketAddr, handle: Handle) -> impl Future<Item = TlsStream<TcpStream>, Error = Error> {
+// fn connect_tls(addr: SocketAddr, handle: Handle) -> impl Future<Item = TlsStream<TcpStream, Arc<ClientConfig>>, Error = Error> {
+//     connect_tcp(addr, handle).from_err().and_then(|socket| {
+//         let tls_context = TlsConnector::builder().unwrap().build().unwrap();
+//         tls_context
+//             .connect_async("gateway.tests.com", socket)
+//             .map_err(|e| Error::with_chain(e, ErrorKind::Msg("TLS handshake failed".into())))
+//     })
+// }
+
+struct RustlsCertVerifier;
+impl rustls::ServerCertVerifier for RustlsCertVerifier {
+    fn verify_server_cert(&self, _roots: &rustls::RootCertStore, _presented_certs: &[rustls::Certificate], _dns_name: webpki::DNSNameRef, _ocsp_response: &[u8]) -> std::result::Result<rustls::ServerCertVerified, rustls::TLSError> {
+        Ok(rustls::ServerCertVerified::assertion())
+    }
+}
+lazy_static!{
+    static ref RUSTLS_CONFIG: Arc<ClientConfig> = {
+        let mut config = ClientConfig::new();
+        config.dangerous().set_certificate_verifier(Arc::new(RustlsCertVerifier));
+        Arc::new(config)
+    };
+}
+
+fn connect_tls(addr: SocketAddr, handle: Handle) -> impl Future<Item = TlsStream<TcpStream, rustls::ClientSession>, Error = Error> {
     connect_tcp(addr, handle).from_err().and_then(|socket| {
-        let tls_context = TlsConnector::builder().unwrap().build().unwrap();
-        tls_context
-            .connect_async("gateway.tests.com", socket)
+        let domain = webpki::DNSNameRef::try_from_ascii_str("gateway.tests.com").unwrap();
+        RUSTLS_CONFIG
+            .connect_async(domain, socket)
             .map_err(|e| Error::with_chain(e, ErrorKind::Msg("TLS handshake failed".into())))
     })
 }
